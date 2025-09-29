@@ -5,6 +5,7 @@ MedQ-Bench MCQ Dataset
 
 import os
 import pandas as pd
+from huggingface_hub import snapshot_download
 from .image_mcq import ImageMCQDataset
 from ..smp import *
 
@@ -15,9 +16,9 @@ class MedqbenchMCQDataset(ImageMCQDataset):
     TYPE = 'MCQ'
     
     DATASET_URL = {
-        'MedqbenchMCQ': '/data/medqbench_QA.tsv',
-        'MedqbenchMCQ_dev': 'data/v0.2/medqbench_QA_dev.tsv',
-        'MedqbenchMCQ_test': 'data/v0.2/medqbench_QA_test.tsv',
+        'MedqbenchMCQ': 'medqbench_QA.tsv',
+        'MedqbenchMCQ_dev': 'medqbench_QA_dev.tsv',
+        'MedqbenchMCQ_test': 'medqbench_QA_test.tsv',
     }
     
     DATASET_MD5 = {
@@ -37,19 +38,38 @@ class MedqbenchMCQDataset(ImageMCQDataset):
             self.custom_data_path = None
         super().__init__(dataset, **kwargs)
     
+    def prepare_dataset(self, dataset_name, repo_id='jiyaoliufd/MedQ-Bench'):
+        """Prepare dataset from Huggingface Hub"""
+        def check_integrity(pth):
+            data_file = osp.join(pth, self.DATASET_URL[dataset_name])
+            return os.path.exists(data_file)
+        
+        cache_path = get_cache_path(repo_id)
+        if cache_path is not None and check_integrity(cache_path):
+            dataset_path = cache_path
+        else:
+            dataset_path = snapshot_download(repo_id=repo_id, repo_type='dataset')
+        
+        data_file = osp.join(dataset_path, self.DATASET_URL[dataset_name])
+        return dict(root=dataset_path, data_file=data_file)
+    
     def load_data(self, dataset):
         if self.custom_data_path is not None:
             data_path = self.custom_data_path
+            data_root = osp.dirname(data_path)
         else:
-            data_path = self.DATASET_URL.get(dataset, None)
-            if data_path is None:
-                raise ValueError(f"Dataset configuration not found for {dataset}")
+            dataset_info = self.prepare_dataset(dataset)
+            data_path = dataset_info['data_file']
+            data_root = dataset_info['root']
         
         if not os.path.exists(data_path):
             raise FileNotFoundError(f"Data file not found: {data_path}")
         
         print(f"Loading MedQ-Bench data file: {data_path}")
         data = load(data_path)
+        
+        # Set data_root for image loading
+        self.data_root = data_root
         
         if 'index' in data.columns:
             data['index'] = data['index'].astype(str)

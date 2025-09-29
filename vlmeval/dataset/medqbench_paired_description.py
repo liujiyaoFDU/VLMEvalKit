@@ -1,6 +1,6 @@
 """
 MedQ-Bench Paired Description Dataset
-成对图像低层次描述评测（描述生成）
+Paired image low-level description evaluation (description generation)
 """
 
 import os
@@ -8,14 +8,15 @@ import json
 import pandas as pd
 import requests
 import time
+from huggingface_hub import snapshot_download
 from .image_base import ImageBaseDataset
 from ..smp import *
 from .medqbench_caption import MedQBench_Caption_Scorer, PROMPT_TEMPLATES
 
-# 配对描述任务专用的判分prompt模板
+# Prompt templates specific to paired description task
 PAIRED_PROMPT_TEMPLATES = {
-    'completeness': PROMPT_TEMPLATES['completeness'],  # 复用原有的completeness
-    'preciseness': PROMPT_TEMPLATES['preciseness'],    # 复用原有的preciseness
+    'completeness': PROMPT_TEMPLATES['completeness'],  # Reuse original completeness
+    'preciseness': PROMPT_TEMPLATES['preciseness'],    # Reuse original preciseness
     'consistency': (
         '#System: You are a helpful assistant.\n'
         '#User: Evaluate the internal consistency between the reasoning path (comparative description of image problems) and the final quality comparison judgment in [MLLM DESC]. '
@@ -41,7 +42,7 @@ class MedQBench_PairedDescription_Scorer:
         self.judge_model = judge_model
         self.n_rounds = n_rounds
         self.nproc = nproc
-        self.sleep = sleep  # 控制API速率
+        self.sleep = sleep  # Control API rate
         self.target_metrics = target_metrics if target_metrics is not None else list(PAIRED_PROMPT_TEMPLATES.keys())
 
     def build_prompt(self, metric, mllm_desc, golden_desc):
@@ -50,15 +51,15 @@ class MedQBench_PairedDescription_Scorer:
         return prompt
 
     def _safe_print_prompt(self, prompt, max_chars=200):
-        """安全地打印prompt，避免编码问题"""
+        """Safely print prompt to avoid encoding issues"""
         try:
-            # 尝试直接打印
+            # Try direct printing
             print("JUDGE PROMPT:", prompt[:max_chars] + ("..." if len(prompt) > max_chars else ""))
         except UnicodeEncodeError:
-            # 如果出现编码错误，使用repr
+            # If encoding error occurs, use repr
             print("JUDGE PROMPT (repr):", repr(prompt[:max_chars]))
         except Exception as e:
-            # 其他错误，打印基本信息
+            # Other errors, print basic information
             print(f"JUDGE PROMPT (error printing): {type(prompt)}, length: {len(prompt)}")
 
     def ask_judge(self, prompt):
@@ -78,7 +79,7 @@ class MedQBench_PairedDescription_Scorer:
 
     @staticmethod
     def parse_score_from_response(resp):
-        # 只提取"Score: x"中的x
+        # Only extract x from "Score: x"
         import re
         import json as _json
         import time
@@ -91,9 +92,9 @@ class MedQBench_PairedDescription_Scorer:
                 return float(match.group(1))
             except:
                 return None
-        # 兼容仅返回数字的情况，如 "2" 或 {"score":2}
+        # Compatible with cases returning only numbers, like "2" or {"score":2}
         try:
-            # 尝试JSON解析
+            # Try JSON parsing
             j = _json.loads(text)
             if isinstance(j, (int, float)) and 0 <= float(j) <= 2:
                 return float(j)
@@ -103,7 +104,7 @@ class MedQBench_PairedDescription_Scorer:
                         return float(j[k])
         except Exception:
             pass
-        # 直接匹配裸数字
+        # Direct match bare numbers
         match2 = re.fullmatch(r'\s*([0-2](?:\.\d+)?)\s*', text)
         if match2:
             try:
@@ -116,7 +117,7 @@ class MedQBench_PairedDescription_Scorer:
         mllm_desc = str(line['prediction'])
         golden_desc = str(line['description'])
         result = {}
-        # 只对目标指标进行打分
+        # Only score target metrics
         for metric in self.target_metrics:
             scores = []
             for _ in range(self.n_rounds):
@@ -124,7 +125,7 @@ class MedQBench_PairedDescription_Scorer:
                 score = self.ask_judge(prompt)
                 scores.append(score)
                 time.sleep(self.sleep)
-            # 过滤None
+            # Filter None
             scores = [x for x in scores if x is not None]
             result[metric] = sum(scores)/len(scores) if scores else None
             result[f'{metric}_scores'] = scores
@@ -133,9 +134,9 @@ class MedQBench_PairedDescription_Scorer:
     def compute_scores(self, use_threading=False):
         from concurrent.futures import ThreadPoolExecutor, as_completed
         import time
-        # 多线程加速（可选）
+        # Multi-threading acceleration (optional)
         results = []
-        # 动态生成默认异常结果（只针对目标指标）
+        # Dynamically generate default exception result (only for target metrics)
         default_result = {metric: None for metric in self.target_metrics}
         
         if use_threading:
@@ -155,7 +156,7 @@ class MedQBench_PairedDescription_Scorer:
                 except Exception as e:
                     res = default_result.copy()
                 results.append((i, res))
-        # 按原顺序排序
+        # Sort by original order
         results = sorted(results, key=lambda x: x[0])
         return [x[1] for x in results]
 
@@ -165,8 +166,8 @@ class MedqbenchPairedDescriptionDataset(ImageBaseDataset):
     TYPE = 'Caption'
 
     DATASET_URL = {
-        'MedqbenchPairedDescription_dev': 'data/v0.3/medqbench_paired_description_dev.tsv',
-        'MedqbenchPairedDescription_test': 'data/v0.3/medqbench_paired_description_test.tsv',
+        'MedqbenchPairedDescription_dev': 'medqbench_paired_description_dev.tsv',
+        'MedqbenchPairedDescription_test': 'medqbench_paired_description_test.tsv',
     }
 
     DATASET_MD5 = {
@@ -185,22 +186,43 @@ class MedqbenchPairedDescriptionDataset(ImageBaseDataset):
             self.custom_data_path = None
         super().__init__(dataset, **kwargs)
 
+    def prepare_dataset(self, dataset_name, repo_id='jiyaoliufd/MedQ-Bench'):
+        """Prepare dataset from Huggingface Hub"""
+        def check_integrity(pth):
+            data_file = osp.join(pth, self.DATASET_URL[dataset_name])
+            return os.path.exists(data_file)
+        
+        cache_path = get_cache_path(repo_id)
+        if cache_path is not None and check_integrity(cache_path):
+            dataset_path = cache_path
+        else:
+            dataset_path = snapshot_download(repo_id=repo_id, repo_type='dataset')
+        
+        data_file = osp.join(dataset_path, self.DATASET_URL[dataset_name])
+        return dict(root=dataset_path, data_file=data_file)
+
     def load_data(self, dataset):
         if hasattr(self, 'custom_data_path') and self.custom_data_path is not None:
             data_path = self.custom_data_path
+            data_root = osp.dirname(data_path)
         else:
-            data_path = self.DATASET_URL.get(dataset, None)
-            if data_path is None:
-                raise ValueError(f"Dataset configuration not found for {dataset}")
+            dataset_info = self.prepare_dataset(dataset)
+            data_path = dataset_info['data_file']
+            data_root = dataset_info['root']
+        
         if not os.path.exists(data_path):
             raise FileNotFoundError(f"Data file not found: {data_path}")
+        
         print(f"Loading MedQ-Bench Paired Description data file: {data_path}")
         data = load(data_path)
+
+        # Set data_root for image loading
+        self.data_root = data_root
 
         if 'index' in data.columns:
             data['index'] = data['index'].astype(str)
 
-        # 兼容image_a/image_b（base64）或image_path列表
+        # Compatible with image_a/image_b (base64) or image_path list
         if 'image_a' in data.columns or 'image_b' in data.columns:
             def _merge_images(row):
                 imgs = []
@@ -212,12 +234,12 @@ class MedqbenchPairedDescriptionDataset(ImageBaseDataset):
                     imgs.append(b)
                 return imgs if len(imgs) > 0 else None
             data['image'] = data.apply(_merge_images, axis=1)
-        # 否则保留 image_path（列表字符串），由 dump_image 解析
+        # Otherwise keep image_path (list string), parsed by dump_image
 
-        # 若无question，给一个通用的描述指令
+        # If no question, provide a general description instruction
         if 'question' not in data:
             data['question'] = [
-                "As a medical image quality assessment expert, provide a concise description comparing two images focusing on low-level appearance. Conclude with which image has higher quality."
+                "As a medical image quality assessment expert, provide a concise description comparing two images focusing on low-level appearance. Conclude with which image has higher quality. Please provide a comprehensive but concise assessment in 3-5 sentences."
                 for _ in range(len(data))
             ]
         return data
@@ -237,15 +259,15 @@ class MedqbenchPairedDescriptionDataset(ImageBaseDataset):
 
     @classmethod
     def _test_judge_availability(cls, judge_kwargs):
-        """测试judge模型API是否可用"""
+        """Test if judge model API is available"""
         try:
             from vlmeval.dataset.utils import build_judge
             import requests
             
-            # 构建judge模型
+            # Build judge model
             judge_model = build_judge(**judge_kwargs)
             
-            # 测试API连接
+            # Test API connection
             if hasattr(judge_model, 'keywords') and 'api_base' in judge_model.keywords:
                 api_base = judge_model.keywords.get('api_base')
                 api_key = judge_model.keywords.get('key')
@@ -256,7 +278,7 @@ class MedqbenchPairedDescriptionDataset(ImageBaseDataset):
                         "Content-Type": "application/json"
                     }
                     
-                    # 获取模型名称
+                    # Get model name
                     model_id = judge_model.keywords.get('model', 'unknown')
                     
                     payload = {
@@ -271,69 +293,69 @@ class MedqbenchPairedDescriptionDataset(ImageBaseDataset):
                     response = requests.post(api_base, headers=headers, json=payload, timeout=30)
                     
                     if response.status_code == 200:
-                        return True, "Judge模型API可用"
+                        return True, "Judge model API is available"
                     else:
                         error_msg = response.json().get('error', {}).get('message', 'Unknown error')
-                        return False, f"Judge模型API请求失败: {error_msg}"
+                        return False, f"Judge model API request failed: {error_msg}"
                 else:
-                    return False, "Judge模型缺少API配置"
+                    return False, "Judge model lacks API configuration"
             else:
-                # 对于本地模型，直接返回可用
-                return True, "本地Judge模型可用"
+                # For local models, directly return available
+                return True, "Local judge model is available"
                 
         except Exception as e:
-            return False, f"Judge模型连接错误: {e}"
+            return False, f"Judge model connection error: {e}"
 
     @classmethod
     def evaluate(cls, eval_file, **judge_kwargs):
         """
-        自动化GPT判分，四项指标：completeness, preciseness, consistency, quality_accuracy。
-        支持1次打分平均。若已有分数字段则直接聚合，否则自动调用judge。
-        judge_kwargs可传model, api_base, api_key等。
+        Automated GPT scoring for four metrics: completeness, preciseness, consistency, quality_accuracy.
+        Supports 1-round scoring average. If score fields already exist, directly aggregate; otherwise automatically call judge.
+        judge_kwargs can pass model, api_base, api_key, etc.
         """
         data = load(eval_file)
         
-        # 检查是否有prediction列，如果没有则无法进行评测
+        # Check if prediction column exists, if not, evaluation cannot proceed
         if 'prediction' not in data.columns:
-            print("警告：Excel文件中没有找到prediction列，无法进行评测")
+            print("Warning: No prediction column found in Excel file, evaluation cannot proceed")
             return {"error": "No prediction column found"}
             
         lt = len(data)
         metrics = list(PAIRED_PROMPT_TEMPLATES.keys())
 
-        # 直接进行judge评测
+        # Directly perform judge evaluation
         from vlmeval.dataset.utils import build_judge
         nproc = judge_kwargs.pop('nproc', 4)
-        n_rounds = judge_kwargs.pop('n_rounds', 1)  # TODO：多次评估的次数，默认为1
+        n_rounds = judge_kwargs.pop('n_rounds', 1)  # Number of multiple evaluations, default is 1
         sleep = judge_kwargs.pop('sleep', 0.5)
-        use_threading = judge_kwargs.pop('use_threading', False)  # 是否使用多线程
+        use_threading = judge_kwargs.pop('use_threading', False)  # Whether to use multithreading
         
         try:
             judge_model = build_judge(**judge_kwargs)
             scorer = MedQBench_PairedDescription_Scorer(data, judge_model, n_rounds=n_rounds, nproc=nproc, sleep=sleep, target_metrics=metrics)
             score_results = scorer.compute_scores(use_threading=use_threading)
             
-            # 写回data
-            # 预创建分数列表列，避免dtype冲突
+            # Write back to data
+            # Pre-create score list columns to avoid dtype conflicts
             for m in metrics:
                 col = f'{m}_scores'
                 if col not in data.columns:
                     data[col] = [None] * lt
             
-            # 更新评测结果
+            # Update evaluation results
             for i, res in enumerate(score_results):
                 for k, v in res.items():
                     if isinstance(v, list):
-                        # 存为JSON字符串，后续用safe_avg_list_col解析
+                        # Store as JSON string, parse later with safe_avg_list_col
                         data.at[i, k] = json.dumps(v, ensure_ascii=False)
                     else:
                         data.at[i, k] = v
             
-            # 保存更新后的数据
+            # Save updated data
             dump(data, eval_file)
             
         except Exception as e:
-            print(f"Judge评测过程中出现错误: {e}")
+            print(f"Error during judge evaluation: {e}")
             return {"error": f"Judge evaluation failed: {e}"}
 
         def avg(lst):
@@ -365,7 +387,7 @@ class MedqbenchPairedDescriptionDataset(ImageBaseDataset):
                     values.append(None)
             return values
 
-        # 聚合
+        # Aggregate
         metric_to_scores = {}
         for m in metrics:
             col = m
@@ -387,14 +409,14 @@ class MedqbenchPairedDescriptionDataset(ImageBaseDataset):
 
         result = metric_avgs
         
-        # 保存详细分数
+        # Save detailed scores
         score_file = eval_file.replace('.xlsx', '_score.json')
         dump(result, score_file)
         
-        # 打印整体结果
+        # Print overall results
         summary_str = ', '.join([f"{m.capitalize()}: {metric_avgs[m]:.4f}" for m in metrics])
-        print(f"\nMedQ-Bench Paired Description评测完成！\n{summary_str}")
-        print(f"结果保存到{score_file}")
+        print(f"\nMedQ-Bench Paired Description evaluation completed!\n{summary_str}")
+        print(f"Results saved to {score_file}")
          
         return result
 
@@ -402,10 +424,10 @@ class MedqbenchPairedDescriptionDataset(ImageBaseDataset):
 if __name__ == "__main__":
     try:
         dataset = MedqbenchPairedDescriptionDataset()
-        print(f"MedQ-Bench Paired Description数据集加载成功! 样本数: {len(dataset)}")
+        print(f"MedQ-Bench Paired Description dataset loaded successfully! Number of samples: {len(dataset)}")
         if len(dataset) > 0:
             sample = dataset[0]
             prompt = dataset.build_prompt(sample)
-            print("Prompt构建成功!")
+            print("Prompt construction successful!")
     except Exception as e:
-        print(f"测试出错: {e}") 
+        print(f"Test error: {e}") 
